@@ -1,7 +1,7 @@
 # Cost-aware portfolio learning
 
 Research project comparing predict-then-optimize (PTO), cost-aware allocation,
-and eventually decision-focused learning (DFL). DFL is not implemented yet.
+and a first linear decision-focused learning (DFL) prototype.
 
 ## Setup and execution
 
@@ -12,6 +12,7 @@ python -m pip install -r requirements.txt
 python src/download_data.py
 python src/analyze_data.py
 python src/diagnose_pto.py
+python src/decision_focused.py
 python -m unittest discover -s tests
 ```
 
@@ -59,7 +60,9 @@ the selection from 2022 onward. Do not rerun tuning to improve the observed test
 execution. `predict_then_optimize.py` is an exploratory calendar-month-target
 experiment. Their dates and conventions differ from the reference experiment;
 do not compare their summary tables directly with the tuned diagnostics.
-`tune_pto.py` and `diagnose_pto.py` define the reference comparison for the next stage.
+`portfolio.py` supplies data preparation, Ridge forecasts, constrained allocation
+and the common backtest used by `tune_pto.py`, `diagnose_pto.py` and
+`decision_focused.py`. The earlier exploratory scripts remain separate.
 
 ## Frozen research snapshot
 
@@ -85,9 +88,90 @@ simple allocations on the observed test. Searching 1,260 configurations over
 four validation years also creates selection risk. The test has already been
 inspected; further model development must disclose this reuse.
 
-## Next stage
+## Decision-focused prototype
 
-Add a minimal DFL model using the same inputs, execution conventions and costs.
-Before adding it, extract the duplicated reference backtest into a shared module
-and check numerical equivalence. Keep the frozen PTO comparison. Evaluate DFL
-without claiming it can recover a signal absent from the input data.
+`decision_focused.py` uses the same linear model features, 48-month training
+window, training-only scaler, label gap, covariance estimator and portfolio
+constraints as the selected PTO. Each month starts from a newly fitted Ridge.
+The coefficients are then optimized for mean historical decision loss:
+
+- negative holding-period net return;
+- plus one half of gamma times portfolio variance;
+- plus an L2 penalty anchoring coefficients to that month's Ridge fit.
+
+The training simulation is sequential: weights drift between execution and
+signal dates; the next decision depends on existing positions. Gradients pass
+through this recurrence and the constrained optimizer using the KKT system
+on the locally fixed active set. They are not globally smooth when bounds become
+active or inactive. The implementation uses NumPy/SciPy, with no new dependency.
+The implicit-differentiation approach follows the general method described in
+[Amos and Kolter (2017), OptNet](https://proceedings.mlr.press/v70/amos17a.html);
+this is a small custom implementation, not their solver or a replication.
+
+Training approximates absolute turnover by `sqrt(delta**2 + 1e-6) - 0.001`.
+Evaluation always charges exact absolute turnover in the shared daily backtest.
+The allocation optimizer retains the PTO's smooth turnover penalty, with the
+same gamma=20 and penalty=0.03. A tighter solver tolerance is used only during
+training to compute meaningful gradients. All strategies use the same default
+solver tolerance during evaluation. Every historical training window restarts
+from cash; its sequence is an empirical training loss, not a reportable backtest.
+
+`config/dfl.json` fixes a coefficient scale-adjusted L2 regularization of 0.001
+and a maximum of 30 optimizer iterations per rolling fit. These are initial
+engineering settings, not selected using the reported comparison. No DFL
+hyperparameter search has been performed. Coefficients are represented in units
+of 0.01, so the regularization applies to these scaled coefficients. A common
+Ridge intercept is retained in forecast outputs but has no effect on a fully
+invested allocation.
+
+A fit is accepted if it converges or reaches its iteration budget and improves
+(or matches) the initial training objective with finite coefficients. Other
+outcomes explicitly fall back to the Ridge initialization. Each fit logs
+convergence, acceptance, losses and the solver message in `dfl_training.csv`.
+An accepted iteration-limited fit is not a claim of convergence.
+
+Outputs in `results/`: `dfl_summary.csv`, `dfl_nav.csv`, `dfl_returns.csv`,
+`dfl_weights.csv`, `dfl_forecasts.csv`, `dfl_coefficients.csv`, and
+`dfl_training.csv`. The coefficient file stores standardized coefficients in
+0.01 units for auditing; it is not a standalone deployable model artifact.
+
+The 2022–2026 comparison is exploratory: this period was inspected during PTO
+development. No fresh, untouched test is claimed. The next research step is to
+inspect fit convergence and stability, then specify a validation protocol before
+changing DFL hyperparameters. Performance improvement is not assumed.
+
+## First DFL run: exploratory results
+
+Same 2022-01-03 through 2026-11-06 snapshot; all returns are net of costs.
+
+| Strategy | Annual return | Sharpe (rf=0) | Max drawdown | Annual traded notional |
+|---|---:|---:|---:|---:|
+| Equal weight | 8.82% | 0.669 | -23.96% | 0.500 |
+| Inverse volatility | 7.85% | 0.716 | -21.11% | 0.525 |
+| Minimum variance | 1.67% | 0.260 | -18.77% | 0.552 |
+| Selected Ridge PTO | 2.37% | 0.311 | -20.78% | 0.261 |
+| Linear DFL prototype | 1.33% | 0.202 | -20.10% | 0.259 |
+
+Of 59 rolling fits, 36 report convergence, 22 reach the iteration limit with
+an accepted training improvement, and one reports abnormal line-search
+termination and falls back to Ridge. These diagnostics limit conclusions about
+the trained method. The run does not establish a DFL advantage: its return and
+Sharpe are lower than PTO, with similar turnover. No settings were changed after
+viewing these results. Diagnose numerical convergence and objective alignment
+before considering any validation-based parameter changes.
+
+## Verification
+
+```bash
+python -m unittest discover -s tests
+```
+
+Tests cover target timing and future-data isolation, optimizer constraints,
+initial-cost drawdown, old-weight execution-day returns and drifted turnover,
+unavailable-label exclusion, and recurrent gradients against finite differences.
+The refactor was also checked against all four original PTO diagnostic CSVs
+at absolute/relative tolerance 1e-12 using the supplied data snapshot.
+
+The full DFL comparison reproduced all four reference strategies within
+rtol=1e-7 / atol=1e-8 across BLAS thread settings. DFL weight constraints,
+label availability and non-increasing accepted training losses were checked.
