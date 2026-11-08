@@ -2,13 +2,12 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-import tune_pto
+import portfolio
 from backtest_baselines import compute_metrics
 
 
@@ -23,26 +22,25 @@ class PortfolioTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
             returns.to_csv(path / 'daily_returns.csv')
-            with patch.object(tune_pto, 'DATA', path):
-                _, features, targets, signal_pos, exec_pos, signals, cov = tune_pto.load_data()
-                i = signals[0]
-                expected = (1 + returns.iloc[exec_pos[i]+1:exec_pos[i+1]+1]).prod() - 1
-                np.testing.assert_allclose(targets[i], expected)
-                self.assertLessEqual(exec_pos[i-1], signal_pos[i])
-                self.assertGreater(exec_pos[i], signal_pos[i])
-                changed = returns.copy()
-                changed.iloc[signal_pos[i]+1:] += 0.005
-                changed.to_csv(path / 'daily_returns.csv')
-                _, new_features, new_targets, _, _, _, new_cov = tune_pto.load_data()
-                np.testing.assert_allclose(features[i], new_features[i])
-                np.testing.assert_allclose(cov[i], new_cov[i])
-                np.testing.assert_allclose(targets[:i-1], new_targets[:i-1], equal_nan=True)
+            _, features, targets, signal_pos, exec_pos, signals, cov = portfolio.load_data(path)
+            i = signals[0]
+            expected = (1 + returns.iloc[exec_pos[i]+1:exec_pos[i+1]+1]).prod() - 1
+            np.testing.assert_allclose(targets[i], expected)
+            self.assertLessEqual(exec_pos[i-1], signal_pos[i])
+            self.assertGreater(exec_pos[i], signal_pos[i])
+            changed = returns.copy()
+            changed.iloc[signal_pos[i]+1:] += 0.005
+            changed.to_csv(path / 'daily_returns.csv')
+            _, new_features, new_targets, _, _, _, new_cov = portfolio.load_data(path)
+            np.testing.assert_allclose(features[i], new_features[i])
+            np.testing.assert_allclose(cov[i], new_cov[i])
+            np.testing.assert_allclose(targets[:i-1], new_targets[:i-1], equal_nan=True)
 
     def test_optimizer_constraints_and_penalty(self):
         previous = np.array([0.5, 0.5])
         mu, cov = np.array([0.02, 0.0]), np.eye(2) * 0.01
-        plain = tune_pto.optimize(mu, cov, 1, 0, previous)
-        penalized = tune_pto.optimize(mu, cov, 1, 0.1, previous)
+        plain = portfolio.optimize(mu, cov, 1, 0, previous)
+        penalized = portfolio.optimize(mu, cov, 1, 0.1, previous)
         for weights in [plain, penalized]:
             self.assertAlmostEqual(weights.sum(), 1)
             self.assertTrue((weights >= 0).all())

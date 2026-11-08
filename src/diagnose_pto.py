@@ -3,12 +3,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import Ridge
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
 
 from backtest_baselines import compute_metrics, compute_weights
-from tune_pto import COST_RATE, LOOKBACK, load_data, optimize
+from portfolio import COST_RATE, LOOKBACK, load_data, optimize, ridge_forecasts, run_backtest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,15 +24,7 @@ def main():
     if not valid:
         raise ValueError("No test observations.")
 
-    predictions = {}
-    model = make_pipeline(StandardScaler(), Ridge(alpha=alpha))
-    for i in valid:
-        start, stop = i - window - 1, i - 1
-        x, y = features[start:stop], targets[start:stop]
-        if start < 0 or not np.isfinite(x).all() or not np.isfinite(y).all():
-            raise ValueError("Invalid training window.")
-        model.fit(x.reshape(-1, x.shape[-1]), y.ravel())
-        predictions[i] = model.predict(features[i])
+    predictions = ridge_forecasts(features, targets, valid, alpha, window)
 
     forecast_rows = []
     for i in valid:
@@ -73,49 +62,19 @@ def main():
         history = returns.iloc[signal_pos[i] - LOOKBACK + 1:signal_pos[i] + 1]
         return compute_weights(history, mode)
 
-    trade_map = {exec_pos[i]: i for i in valid}
-    signal_map = {signal_pos[i]: i for i in valid[1:]}
     first = exec_pos[valid[0]]
     dates = returns.index
-
     metrics, navs, allocation_rows = {}, {}, []
     for strategy in strategies:
-        weights = None
-        pending = target(valid[0], None, strategy)
-        nav = 1.0
-        records = []
-
-        for t in range(first, len(returns)):
-            daily = returns.iloc[t].to_numpy()
-            gross = 0.0 if weights is None else float(weights @ daily)
-            pre_trade = None if weights is None else weights * (1 + daily) / (1 + gross)
-            turnover = 0.0
-
-            if t in trade_map:
-                turnover = 1.0 if pre_trade is None else float(np.abs(pending - pre_trade).sum())
-                weights = pending
-                allocation_rows.append({
-                    "Date": dates[t], "strategy": strategy,
-                    **dict(zip(returns.columns, weights)),
-                })
-            else:
-                weights = pre_trade
-
-            cost = COST_RATE * turnover
-            net_return = (1 + gross) * (1 - cost) - 1
-            nav *= 1 + net_return
-            records.append((dates[t], net_return, nav, turnover, cost))
-
-            if t in signal_map:
-                pending = target(signal_map[t], weights, strategy)
-
-        performance = pd.DataFrame(
-            records, columns=["Date", "net_return", "nav", "turnover", "cost_rate"]
-        ).set_index("Date")
+        performance, allocation = run_backtest(
+            returns, signal_pos, exec_pos, signals,
+            lambda i, previous: target(i, previous, strategy), strategy, TEST_START,
+        )
+        allocation_rows.append(allocation)
         metrics[strategy] = compute_metrics(performance)
         navs[strategy] = performance["nav"]
 
-    allocations = pd.DataFrame(allocation_rows)
+    allocations = pd.concat(allocation_rows, ignore_index=True)
     summary = pd.DataFrame(metrics).T
     for strategy, group in allocations.groupby("strategy"):
         weights = group[list(returns.columns)]
